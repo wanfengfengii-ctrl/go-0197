@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 
 	"github.com/aliquotseal/maternal-lineage-freeze/internal/aliquot"
 	"github.com/aliquotseal/maternal-lineage-freeze/internal/catalog"
@@ -22,6 +23,27 @@ func fingerprint(kind string, v any) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// canonicalChildPlan returns a copy of the plan ordered by (ordinal, child tube
+// number). Reservation freezes the plan in ordinal order (domain rule 2: the
+// plan order is the ordinal, carried by each child), so the array order a
+// caller supplies is presentation only. Two requests carrying the same children
+// in a different array order are semantically identical and must share a
+// fingerprint so the retry replays the original result instead of conflicting
+// (domain rule 11). Every per-child ordinal, tube number, and allocation still
+// participates in the marshaled value, so any genuine content change yields a
+// distinct fingerprint.
+func canonicalChildPlan(plan []aliquot.ChildPlan) []aliquot.ChildPlan {
+	out := make([]aliquot.ChildPlan, len(plan))
+	copy(out, plan)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ordinal != out[j].Ordinal {
+			return out[i].Ordinal < out[j].Ordinal
+		}
+		return out[i].ChildTubeID < out[j].ChildTubeID
+	})
+	return out
+}
+
 func fingerprintReserve(c ReserveMotherCommand) string {
 	return fingerprint("reserve", struct {
 		Mother   catalog.TubeID
@@ -31,7 +53,7 @@ func fingerprintReserve(c ReserveMotherCommand) string {
 		Locked   int64
 		Children []aliquot.ChildPlan
 		Expected int64
-	}{c.MotherTubeID, c.SampleID, c.BatchID, c.Revision, c.LockedVolume, c.Children, c.ExpectedRevision})
+	}{c.MotherTubeID, c.SampleID, c.BatchID, c.Revision, c.LockedVolume, canonicalChildPlan(c.Children), c.ExpectedRevision})
 }
 
 func fingerprintThaw(c ConfirmThawCommand) string {

@@ -29,6 +29,9 @@ func (s *Store) Bootstrap(ctx context.Context, opID, fingerprint string, facts s
 	if n > 0 {
 		return store.ErrAlreadyBootstrapped
 	}
+	if err := validateBootstrapFacts(facts); err != nil {
+		return aliquot.NewError(aliquot.CodeInvalidState, 0, err.Error())
+	}
 
 	for _, spec := range facts.Specimens {
 		if _, err := tx.ExecContext(ctx,
@@ -57,6 +60,55 @@ func (s *Store) Bootstrap(ctx context.Context, opID, fingerprint string, facts s
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit bootstrap: %w", err)
+	}
+	return nil
+}
+
+type bootstrapBatchKey struct {
+	sampleID catalog.SampleID
+	batchID  catalog.BatchID
+	revision catalog.Revision
+}
+
+func validateBootstrapFacts(facts store.Facts) error {
+	specimens := make(map[catalog.SampleID]catalog.Specimen, len(facts.Specimens))
+	for _, spec := range facts.Specimens {
+		if _, exists := specimens[spec.ID]; exists {
+			return fmt.Errorf("duplicate specimen %q", spec.ID)
+		}
+		specimens[spec.ID] = spec
+	}
+
+	revisions := make(map[bootstrapBatchKey]catalog.BatchRevision, len(facts.BatchRevisions))
+	for _, br := range facts.BatchRevisions {
+		if _, exists := specimens[br.SampleID]; !exists {
+			return fmt.Errorf("batch revision %q/%q for unknown specimen %q", br.BatchID, br.Revision, br.SampleID)
+		}
+		key := bootstrapBatchKey{sampleID: br.SampleID, batchID: br.BatchID, revision: br.Revision}
+		if _, exists := revisions[key]; exists {
+			return fmt.Errorf("duplicate batch revision %q/%q for specimen %q", br.BatchID, br.Revision, br.SampleID)
+		}
+		revisions[key] = br
+	}
+
+	for _, mother := range facts.Mothers {
+		spec, exists := specimens[mother.SampleID]
+		if !exists {
+			return fmt.Errorf("mother %q references unknown specimen %q", mother.TubeID, mother.SampleID)
+		}
+		key := bootstrapBatchKey{sampleID: mother.SampleID, batchID: mother.BatchID, revision: mother.Revision}
+		br, exists := revisions[key]
+		if !exists {
+			return fmt.Errorf("mother %q references unknown batch revision %q/%q for specimen %q", mother.TubeID, mother.BatchID, mother.Revision, mother.SampleID)
+		}
+		container := catalog.Container{
+			ID: mother.TubeID, Type: catalog.MotherContainer,
+			SampleID: mother.SampleID, BatchID: mother.BatchID,
+			Revision: mother.Revision, RemainingUL: mother.VolumeUL,
+		}
+		if err := catalog.ValidateReference(spec, br, container); err != nil {
+			return err
+		}
 	}
 	return nil
 }

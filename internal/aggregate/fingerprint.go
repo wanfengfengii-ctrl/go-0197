@@ -31,7 +31,7 @@ func fingerprintReserve(c ReserveMotherCommand) string {
 		Locked   int64
 		Children []aliquot.ChildPlan
 		Expected int64
-	}{c.MotherTubeID, c.SampleID, c.BatchID, c.Revision, c.LockedVolume, c.Children, c.ExpectedRevision})
+	}{c.MotherTubeID, c.SampleID, c.BatchID, c.Revision, c.LockedVolume, aliquot.SortPlan(c.Children), c.ExpectedRevision})
 }
 
 func fingerprintThaw(c ConfirmThawCommand) string {

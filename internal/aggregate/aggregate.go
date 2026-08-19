@@ -535,6 +535,15 @@ func (s *service) BootstrapCatalog(ctx context.Context, c BootstrapCommand) erro
 		}
 		return aliquot.NewError(aliquot.Code(res.Code), res.Revision, res.Message)
 	}
+	// Validate catalog reference consistency before the first write (failure
+	// boundary 1): a batch revision belonging to another sample, a mother that
+	// references an unknown specimen or batch revision, or any cross-sample
+	// mismatch is rejected as a stable INVALID_STATE error without persisting
+	// any sample, batch, mother, or operation record. The rejection is not
+	// persisted, so a retry with corrected facts can still succeed.
+	if err := validateBootstrapFacts(c.Facts); err != nil {
+		return aliquot.NewError(aliquot.CodeInvalidState, 0, "")
+	}
 	if err := s.store.Bootstrap(ctx, c.OperationID, fp, c.Facts); err != nil {
 		if err == store.ErrAlreadyBootstrapped {
 			return aliquot.NewError(aliquot.CodeInvalidState, 0, "catalog already bootstrapped")
@@ -542,6 +551,23 @@ func (s *service) BootstrapCatalog(ctx context.Context, c BootstrapCommand) erro
 		return err
 	}
 	return nil
+}
+
+// validateBootstrapFacts verifies that every batch revision and mother tube in a
+// bootstrap facts set references a registered specimen, and that every mother
+// references a registered batch revision belonging to its own sample. It returns
+// a descriptive error naming the first dangling or cross-sample reference.
+func validateBootstrapFacts(facts store.Facts) error {
+	mothers := make([]catalog.Container, 0, len(facts.Mothers))
+	for _, m := range facts.Mothers {
+		mothers = append(mothers, catalog.Container{
+			ID:       m.TubeID,
+			SampleID: m.SampleID,
+			BatchID:  m.BatchID,
+			Revision: m.Revision,
+		})
+	}
+	return catalog.ValidateFacts(facts.Specimens, facts.BatchRevisions, mothers)
 }
 
 // GetManifest returns the immutable lineage manifest for a finalized session.

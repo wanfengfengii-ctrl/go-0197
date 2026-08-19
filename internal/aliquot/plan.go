@@ -28,6 +28,16 @@ func ValidatePlan(locked int64, plan []ChildPlan) error {
 		if c.PlannedVolumeUL > locked {
 			return fmt.Errorf("child %q allocation %d exceeds locked volume %d", c.ChildTubeID, c.PlannedVolumeUL, locked)
 		}
+		// Guard the running total against integer overflow. Each allocation is
+		// positive and at most locked, so total stays within [0, locked] and the
+		// subtraction below cannot overflow. Comparing the next allocation
+		// against the remaining headroom rejects any plan whose true total
+		// exceeds locked, including the case where a naive sum would overflow
+		// int64 and wrap negative (domain rule 5, failure boundary 1). A rejected
+		// plan therefore never reaches a reservation write.
+		if c.PlannedVolumeUL > locked-total {
+			return fmt.Errorf("plan total exceeds locked volume %d", locked)
+		}
 		total += c.PlannedVolumeUL
 	}
 	if total > locked {

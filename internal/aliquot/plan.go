@@ -28,6 +28,9 @@ func ValidatePlan(locked int64, plan []ChildPlan) error {
 		if c.PlannedVolumeUL > locked {
 			return fmt.Errorf("child %q allocation %d exceeds locked volume %d", c.ChildTubeID, c.PlannedVolumeUL, locked)
 		}
+		if c.PlannedVolumeUL > locked-total {
+			return fmt.Errorf("plan total exceeds locked volume %d", locked)
+		}
 		total += c.PlannedVolumeUL
 	}
 	if total > locked {

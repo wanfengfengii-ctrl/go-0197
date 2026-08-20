@@ -607,6 +607,13 @@ func bumpSession(ctx context.Context, tx *sql.Tx, sessionID catalog.SessionID, s
 	if err != nil {
 		return fmt.Errorf("bump session: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE containers SET status = ?
+		 WHERE type = 'mother' AND tube_id = (
+			SELECT mother_tube_id FROM aliquot_sessions WHERE session_id = ?
+		)`, string(status), string(sessionID)); err != nil {
+		return fmt.Errorf("sync mother status: %w", err)
+	}
 	return nil
 }
 

@@ -124,7 +124,7 @@ func (s *Store) Thaw(ctx context.Context, r store.ThawRequest) (store.CommandRes
 	}
 	defer tx.Rollback()
 
-	rev, _, _, err := loadSessionRowTx(ctx, tx, r.SessionID)
+	rev, _, motherID, err := loadSessionRowTx(ctx, tx, r.SessionID)
 	if err != nil {
 		return store.CommandResult{}, err
 	}
@@ -134,6 +134,11 @@ func (s *Store) Thaw(ctx context.Context, r store.ThawRequest) (store.CommandRes
 
 	newRev := rev + 1
 	if err := bumpSession(ctx, tx, r.SessionID, aliquot.StatusThawed, newRev, "", ""); err != nil {
+		return store.CommandResult{}, err
+	}
+	// Mirror the thawed lifecycle onto the mother container in the same
+	// transaction so the container directory never lags behind the session view.
+	if err := setMotherStatus(ctx, tx, motherID, aliquot.StatusThawed); err != nil {
 		return store.CommandResult{}, err
 	}
 	if err := writeOperationResult(ctx, tx, r.OperationID, r.Fingerprint, "ok", "", string(r.SessionID), newRev, ""); err != nil {
@@ -227,6 +232,11 @@ func (s *Store) CreateChild(ctx context.Context, r store.ChildRequest) (store.Co
 	if err := bumpSession(ctx, tx, r.SessionID, r.NewStatus, newRev, "", ""); err != nil {
 		return store.CommandResult{}, err
 	}
+	// Mirror the new lifecycle state (aliquoting or depleted) onto the mother
+	// container in the same transaction as the child artifacts above.
+	if err := setMotherStatus(ctx, tx, motherID, r.NewStatus); err != nil {
+		return store.CommandResult{}, err
+	}
 	if err := writeOperationResult(ctx, tx, r.OperationID, r.Fingerprint, "ok", "", string(r.SessionID), newRev, ""); err != nil {
 		return store.CommandResult{}, err
 	}
@@ -278,6 +288,11 @@ func (s *Store) RecordLoss(ctx context.Context, r store.LossRequest) (store.Comm
 
 	newRev := rev + 1
 	if err := bumpSession(ctx, tx, r.SessionID, r.NewStatus, newRev, "", ""); err != nil {
+		return store.CommandResult{}, err
+	}
+	// Mirror the lifecycle state onto the mother container in the same
+	// transaction; a loss that drains the remaining volume moves it to depleted.
+	if err := setMotherStatus(ctx, tx, motherID, r.NewStatus); err != nil {
 		return store.CommandResult{}, err
 	}
 	if err := writeOperationResult(ctx, tx, r.OperationID, r.Fingerprint, "ok", "", string(r.SessionID), newRev, ""); err != nil {
@@ -606,6 +621,21 @@ func bumpSession(ctx context.Context, tx *sql.Tx, sessionID catalog.SessionID, s
 		string(status), revision, string(terminal), reason, string(sessionID))
 	if err != nil {
 		return fmt.Errorf("bump session: %w", err)
+	}
+	return nil
+}
+
+// setMotherStatus mirrors the mother container status to the session's lifecycle
+// state within the same transaction. Every non-terminal commit boundary (thaw,
+// child creation, loss) keeps the container directory consistent with the session
+// view, so a restart or a direct container read never exposes a stale "reserved"
+// status after the session has already advanced. Terminal transitions set the
+// container status in their own write path and do not route through here.
+func setMotherStatus(ctx context.Context, tx *sql.Tx, motherID catalog.TubeID, status aliquot.MotherStatus) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE containers SET status = ? WHERE tube_id = ?`,
+		string(status), string(motherID)); err != nil {
+		return fmt.Errorf("set mother status: %w", err)
 	}
 	return nil
 }

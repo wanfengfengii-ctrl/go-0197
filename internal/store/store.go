@@ -123,6 +123,7 @@ type OperationResult struct {
 	Revision    int64
 	Terminal    TerminalKind
 	SessionID   catalog.SessionID
+	Snapshot    string
 }
 
 // CommandResult is the committed outcome of a successful write.

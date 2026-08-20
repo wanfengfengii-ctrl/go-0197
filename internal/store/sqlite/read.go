@@ -40,11 +40,11 @@ func (s *Store) LoadMother(ctx context.Context, id catalog.TubeID) (*catalog.Con
 
 // LoadOperation loads a persisted operation result by operation ID.
 func (s *Store) LoadOperation(ctx context.Context, opID string) (*store.OperationResult, error) {
-	const q = `SELECT operation_id, fingerprint, status_code, message, revision, terminal, session_id
+	const q = `SELECT operation_id, fingerprint, status_code, message, revision, terminal, session_id, snapshot
 	           FROM operation_results WHERE operation_id = ?`
 	var r store.OperationResult
 	err := s.db.QueryRowContext(ctx, q, opID).Scan(
-		&r.OperationID, &r.Fingerprint, &r.Code, &r.Message, &r.Revision, &r.Terminal, &r.SessionID)
+		&r.OperationID, &r.Fingerprint, &r.Code, &r.Message, &r.Revision, &r.Terminal, &r.SessionID, &r.Snapshot)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

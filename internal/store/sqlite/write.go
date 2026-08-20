@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/aliquotseal/maternal-lineage-freeze/internal/catalog"
 	"github.com/aliquotseal/maternal-lineage-freeze/internal/lineage"
 	"github.com/aliquotseal/maternal-lineage-freeze/internal/store"
+	"github.com/aliquotseal/maternal-lineage-freeze/internal/volume"
 )
 
 // Bootstrap transactionally registers catalog facts in an empty database and
@@ -611,14 +613,92 @@ func bumpSession(ctx context.Context, tx *sql.Tx, sessionID catalog.SessionID, s
 }
 
 func writeOperationResult(ctx context.Context, tx *sql.Tx, opID, fingerprint, code, message, sessionID string, revision int64, terminal store.TerminalKind) error {
+	snapshot := ""
+	if code == "ok" && sessionID != "" {
+		sess, err := loadOperationSnapshot(ctx, tx, catalog.SessionID(sessionID))
+		if err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(sess)
+		if err != nil {
+			return fmt.Errorf("encode operation snapshot: %w", err)
+		}
+		snapshot = string(encoded)
+	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO operation_results (operation_id, fingerprint, status_code, message, revision, terminal, session_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		opID, fingerprint, code, message, revision, string(terminal), sessionID)
+		`INSERT INTO operation_results (operation_id, fingerprint, status_code, message, revision, terminal, session_id, snapshot)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		opID, fingerprint, code, message, revision, string(terminal), sessionID, snapshot)
 	if err != nil {
 		return fmt.Errorf("write operation result: %w", err)
 	}
 	return nil
+}
+
+func loadOperationSnapshot(ctx context.Context, tx *sql.Tx, sessionID catalog.SessionID) (*store.Session, error) {
+	sess := &store.Session{ID: sessionID, Verifications: map[catalog.TubeID]lineage.Verification{}}
+	const sessionQuery = `SELECT session_id, mother_tube_id, sample_id, batch_id, revision,
+		locked_volume_uL, status, revision_num, terminal_kind, terminal_reason, created_at
+		FROM aliquot_sessions WHERE session_id = ?`
+	var createdAt string
+	if err := tx.QueryRowContext(ctx, sessionQuery, string(sessionID)).Scan(
+		&sess.ID, &sess.MotherTubeID, &sess.SampleID, &sess.BatchID, &sess.Revision,
+		&sess.LockedVolumeUL, &sess.Status, &sess.RevisionNum, &sess.TerminalKind,
+		&sess.TerminalReason, &createdAt); err != nil {
+		return nil, fmt.Errorf("load operation snapshot session: %w", err)
+	}
+	sess.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+
+	children, err := tx.QueryContext(ctx,
+		`SELECT ordinal, child_tube_id, planned_volume_uL, created
+		 FROM planned_children WHERE session_id = ? ORDER BY ordinal`, string(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("load operation snapshot children: %w", err)
+	}
+	for children.Next() {
+		var child store.PlannedChild
+		if err := children.Scan(&child.Ordinal, &child.ChildTubeID, &child.PlannedVolumeUL, &child.Created); err != nil {
+			children.Close()
+			return nil, fmt.Errorf("scan operation snapshot child: %w", err)
+		}
+		sess.Children = append(sess.Children, child)
+	}
+	if err := children.Err(); err != nil {
+		children.Close()
+		return nil, fmt.Errorf("iterate operation snapshot children: %w", err)
+	}
+	if err := children.Close(); err != nil {
+		return nil, fmt.Errorf("close operation snapshot children: %w", err)
+	}
+
+	entries, err := tx.QueryContext(ctx,
+		`SELECT seq, entry_type, quantity_uL, child_tube_id, operation_id
+		 FROM volume_entries WHERE session_id = ? ORDER BY seq`, string(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("load operation snapshot entries: %w", err)
+	}
+	for entries.Next() {
+		var entry volume.Entry
+		if err := entries.Scan(&entry.Seq, &entry.Type, &entry.QuantityUL, &entry.ChildTubeID, &entry.OperationID); err != nil {
+			entries.Close()
+			return nil, fmt.Errorf("scan operation snapshot entry: %w", err)
+		}
+		sess.Entries = append(sess.Entries, entry)
+	}
+	if err := entries.Err(); err != nil {
+		entries.Close()
+		return nil, fmt.Errorf("iterate operation snapshot entries: %w", err)
+	}
+	if err := entries.Close(); err != nil {
+		return nil, fmt.Errorf("close operation snapshot entries: %w", err)
+	}
+
+	verifications, err := loadVerificationsTx(ctx, tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sess.Verifications = verifications
+	return sess, nil
 }
 
 func writeEvent(ctx context.Context, tx *sql.Tx, sessionID string, revision int64, commandType, result, opID string) error {

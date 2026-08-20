@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -66,6 +67,13 @@ func (s *service) checkOperation(ctx context.Context, opID, fp string) (*store.O
 func (s *service) replayResult(ctx context.Context, sessionID catalog.SessionID, res *store.OperationResult) (SessionView, error) {
 	if res.Code != "ok" {
 		return SessionView{}, aliquot.NewError(aliquot.Code(res.Code), res.Revision, res.Message)
+	}
+	if res.Snapshot != "" {
+		var sess store.Session
+		if err := json.Unmarshal([]byte(res.Snapshot), &sess); err != nil {
+			return SessionView{}, fmt.Errorf("decode operation snapshot: %w", err)
+		}
+		return buildView(&sess), nil
 	}
 	sess, err := s.store.LoadSession(ctx, sessionID)
 	if err != nil {

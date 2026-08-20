@@ -112,7 +112,8 @@ var schema = []string{
 		message      TEXT NOT NULL DEFAULT '',
 		revision     INTEGER NOT NULL,
 		terminal     TEXT NOT NULL DEFAULT '',
-		session_id   TEXT NOT NULL DEFAULT ''
+		session_id   TEXT NOT NULL DEFAULT '',
+		snapshot     TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE TABLE IF NOT EXISTS session_events (
 		id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,8 +137,45 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("apply schema: %w", err)
 		}
 	}
+	if err := ensureOperationSnapshotColumn(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func ensureOperationSnapshotColumn(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(operation_results)`)
+	if err != nil {
+		return fmt.Errorf("inspect operation_results: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan operation_results column: %w", err)
+		}
+		if name == "snapshot" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate operation_results columns: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close operation_results columns: %w", err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE operation_results ADD COLUMN snapshot TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add operation snapshot: %w", err)
 	}
 	return nil
 }
